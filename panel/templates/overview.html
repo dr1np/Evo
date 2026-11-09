@@ -20,14 +20,14 @@
 {% else %}
 
 <div class="ov-top">
-  <section class="card rank-card" aria-label="当前段位">
+  <section class="card rank-card" aria-label="{{ rank_label }}">
     {% if share %}<div class="share-corner">{{ share_button('分享') }}</div>{% endif %}
     {% if account_view.all %}
     {# 选了"全部账号"：几个账号的段位混在一起没有意义 #}
-    <div class="label">当前段位</div>
+    <div class="label">{{ rank_label }}</div>
     <div class="rank-empty">段位按账号分开。在右上角选一个账号，就能看到它的段位。</div>
     {% elif rank %}
-    <div class="label">当前段位 · 截至 {{ rank.as_of }}</div>
+    <div class="label">{{ rank_label }} · 截至 {{ rank.as_of }}</div>
     <div class="rank-head">
       {% if rank.icon %}
       <div class="rank-emblem tier-{{ rank.tier_class }}" aria-hidden="true">
@@ -43,7 +43,7 @@
       </div>
     </div>
     {% else %}
-    <div class="label">当前段位</div>
+    <div class="label">{{ rank_label }}</div>
     <div class="rank-empty">还没有段位数据。每局结束后切到经验值页、等数字停下再离开，这里就会显示段位。</div>
     {% endif %}
     <div class="mini-stats">
@@ -58,7 +58,7 @@
       <h2>RP 走势</h2>
       <div class="seg" role="group" aria-label="统计范围">
         {% for key, label in ranges.items() %}
-        <a href="{{ overview_url(range=None if key == '30' else key) }}" class="{{ 'on' if range_key == key }}">{{ label }}</a>
+        <a href="{{ overview_url(range=None if key == 'season' else key) }}" class="{{ 'on' if range_key == key }}"{% if range_key == key %} aria-current="true"{% endif %}{% if range_titles.get(key) %} title="{{ range_titles[key] }}"{% endif %}>{{ label }}</a>
         {% endfor %}
       </div>
     </div>
@@ -103,7 +103,7 @@
       </div>
       {% if stat_legends %}
       <form method="get" action="{{ url_for('overview') }}" class="stat-legend-form">
-        {% if range_key != '30' %}<input type="hidden" name="range" value="{{ range_key }}">{% endif %}
+        {% if range_key != 'season' %}<input type="hidden" name="range" value="{{ range_key }}">{% endif %}
         {% if stat_mode != 'all' %}<input type="hidden" name="mode" value="{{ stat_mode }}">{% endif %}
         <label class="sr-only" for="stat-legend">传奇</label>
         <select id="stat-legend" name="legend" onchange="this.form.submit()">
@@ -137,8 +137,9 @@
   <section class="card list-card" aria-label="最近对局">
     <div class="card-head">
       <h2>最近对局</h2>
-      <a class="muted small" href="{{ url_for('matches') }}">查看全部 →</a>
+      <a class="muted small" href="{{ url_for('matches', range=none if range_key == 'season' else ('all' if range_key == '30' else range_key)) }}">查看全部 →</a>
     </div>
+    {% if not recent %}{% include "_season_empty.html" %}{% endif %}
     <ul class="recent">
       {% for r in recent %}
       <li>

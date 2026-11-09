@@ -1,0 +1,9 @@
+<div class="range-empty" role="status">
+  <p>{{ ranges[range_key] }}{% if range_titles.get(range_key) %}（{{ range_titles[range_key] }}）{% endif %}还没有对局{% if range_key == "season" %}，打完一局就会算进来{% endif %}。</p>
+  <p>查看
+  {% for key in ("last", "all") if key in ranges and key != range_key %}
+    {% if not loop.first %}或{% endif %}
+    <a class="text-link" href="{{ url_for(request.endpoint, range=key, **(request.view_args or {})) }}">{{ ranges[key] }}</a>
+  {% endfor %}
+  </p>
+</div>

@@ -14,6 +14,12 @@ import time
 
 import fake_game  # noqa: F401  要在项目代码之前导入（设置临时数据文件夹）
 import test_accounts
+import test_capture
+import test_season31
+import test_season_import
+import test_season_ranges
+import test_season_stats
+import test_seasons_page
 import test_analytics
 import test_autostart
 import test_aspect
@@ -78,6 +84,12 @@ TESTS = {"总结页停留": test_summary_page, "轻量（按需加载模型）":
 TESTS["同步升级兼容、旧版往返、DPAPI 和可选截图"] = test_sync_compatibility
 TESTS["统计服务跨设备对局去重、旧上报迁移与事务"] = test_stats_worker
 TESTS["交互分析、筛选范围与缺失值"] = test_analytics
+TESTS["双显卡截屏及回退"] = test_capture
+TESTS["第 31 赛季识别"] = test_season31
+TESTS["历史赛季 OCR"] = test_season_stats
+TESTS["历史赛季录入"] = test_season_import
+TESTS["历史赛季面板"] = test_seasons_page
+TESTS["赛季范围与跨赛季校准"] = test_season_ranges
 
 try:  # 云同步（微信小程序）的测试只在开发者电脑上，不上传 GitHub（2026-10-24 用户决定）：有就一起跑
     import test_cloud_sync

@@ -212,10 +212,10 @@ def main():
     client = panel_app.app.test_client()
     with client.session_transaction() as s:
         s["account"] = main_id  # 大号（没选时默认看最近玩过的小号）
-    recent = client.get("/stats").get_data(as_text=True)
+    recent = client.get("/stats?range=30").get_data(as_text=True)
     cards = client.get("/stats?range=all").get_data(as_text=True)
     everything = "".join(client.get(f"/stats/{part}?range=all").get_data(as_text=True) for part in ("mates", "legends"))
-    recent_mates = client.get("/stats/mates").get_data(as_text=True)
+    recent_mates = client.get("/stats/mates?range=30").get_data(as_text=True)
     overview_all = client.get("/?range=all").get_data(as_text=True)
     unknown = client.get("/stats/x").status_code
     nav = re.findall(r'<nav class="nav".*?</nav>', recent, re.S)[0]
@@ -259,7 +259,7 @@ def main():
     panel_app.app.config["DB"] = path
 
     checks = {
-        "导航：总览、战绩、数据、设置": re.findall(r">\s*([^<>\s]+)\s*</a>", nav) == ["总览", "战绩", "数据", "设置"],
+        "导航：总览、战绩、数据、赛季、设置": re.findall(r">\s*([^<>\s]+)\s*</a>", nav) == ["总览", "战绩", "数据", "赛季", "设置"],
         "数据页打开时导航里\"数据\"是选中的": 'class="active"' in re.findall(r'<a href="/stats"[^>]*>', nav)[0],
         "没有对局：显示\"还没有任何对局记录\"": "还没有任何对局记录" in empty,
         "两列卡片：最常用武器、常一起玩的队友、传奇表现、传奇组合": re.search(

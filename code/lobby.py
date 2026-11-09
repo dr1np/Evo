@@ -3,6 +3,8 @@
 - 段位那一栏整块读一遍，按格式找出段位那一行（"钻石II"）和段内分数那一行（"868/1000 排位点数"）：
   组队、有活动文字时这一栏会上下移动，按格式找就不怕
 - 段（I–IV）以段位徽章下面的罗马数字为准：段位那一行的文字常把"钻石 II"读成"钻石I""钻石ⅡI"
+- 段内分数那一行的斜杠在 4:3 压扁的画面上常读错（"6817750 RP""436/750.RP"，2026-11-04 测试员的截图）：
+  格式对不上时用这一段的满分和右边"▶ 69 RP"（还差多少）拆开（split_progress）
 - 玩家名：左上角组队列表第一行（自己）
 - 进大厅后每张都读，连续两次读到一样的段位和分数就定下来（总分短时间内不会变），记进 lobby_readings 表，
   然后用它校准前后两次大厅之间各局的 RP（见 calibration.py），这次停在大厅就不再读
@@ -45,6 +47,33 @@ def parse_tier(text, names=None):
     return None
 
 
+SUFFIX = r"[^\dA-Za-z]*(?:RP|排位点数)"  # 数字后面的"RP"，中间可能多读出一个点
+BODY = re.compile(rf"(\d[\d/\\|lI.]*?){SUFFIX}")  # "436/750"这一串：斜杠可能读成 7、1、l、I、|、点
+
+
+def split_progress(lines, size, remaining=()):
+    """段内分数那一行的斜杠读错了时（4:3 压扁的画面常见："436/750.RP""6817750 RP"），用这一段的满分拆开。
+    lines：段位那一栏读到的每一行（去掉空格）；size：这一段满分（白银 750，ranks.division_size）；
+    remaining：右边"▶ 314 RP"（离下一段还差多少）读到的数，有的话用来核对：分数 + 还差多少 = 满分。
+    拆不出、拆出两种又没法核对时返回 None（宁可读不到，也不要读错）。"""
+    if not size:
+        return None
+    tail = str(size)
+    for line in lines:
+        m = BODY.fullmatch(line)
+        if not m or not m[1].endswith(tail) or len(m[1]) <= len(tail):
+            continue
+        head = m[1][:-len(tail)]
+        # 斜杠没读出来（"436750"），或者读成了一个别的字（"6817750"的 7）
+        values = {int(h) for h in (head, head[:-1]) if h.isdigit() and int(h) < size}
+        checked = {v for v in values for r in remaining if v + r == size}
+        if checked:
+            values = checked
+        if len(values) == 1:
+            return values.pop()
+    return None
+
+
 class LobbyReader:
     def __init__(self, engine, cfg=None):
         self.engine = engine
@@ -54,6 +83,11 @@ class LobbyReader:
         result = self.engine(crop(frame, spec["roi"], {**self.cfg, "upscale": spec["upscale"]}, spec.get("anchor")))
         return list(zip(result.txts or (), result.scores or ()))
 
+    @staticmethod
+    def _spots(spec):
+        """主区域，再加上 also 里的几处（只写和主区域不一样的项，如第 30 赛季的位置）：前面的读不到才读后面的。"""
+        return [spec, *({**spec, **other} for other in spec.get("also", []))]
+
     def read(self, frame):
         """读一张大厅截图。返回字典：name、tier、division、progress、score（读不出的为 None），
         以及 text_division、emblem（文字和徽章各自读到的段，写日志用）。"""
@@ -62,6 +96,8 @@ class LobbyReader:
                "text_division": None, "emblem": None}
         panel, patterns = c["panel"], c["patterns"]
         names = ranks.tier_names(c.get("language"))
+        lines = []  # 这一栏读到的每一行（去掉空格）：段内分数那一行格式对不上时再拆一遍，见下面
+        wholes = []  # 只有一个分数的那几行（"16523 排位点数""▶ 62 RP"），见下面
         for text, score in self._lines(frame, panel):
             if score < panel["min_score"]:
                 continue
@@ -70,20 +106,34 @@ class LobbyReader:
                 out["tier"] = tier[0]
                 out["text_division"] = tier[1] if score >= c["text_division_score"] else None
             compact = text.replace(" ", "")
-            m = re.search(patterns["progress"], compact) or re.match(patterns["whole_progress"], compact)
+            lines.append(compact)
+            m = re.search(patterns["progress"], compact)
             if m and out["progress"] is None:
                 out["progress"] = int(m[1])
-        emblem = c["emblem"]
-        for text, score in self._lines(frame, emblem):
-            if score >= emblem["min_score"] and roman(text):
-                out["emblem"] = roman(text)
+            m = re.match(patterns["whole_progress"], compact)
+            if m:
+                wholes.append(int(m[1]))
+        if out["progress"] is None and out["tier"] is not None and not ranks.has_divisions(out["tier"]):
+            # 大师、猎杀者不分段，可能只写一个分数。分段的段位不用它：第 31 赛季起"688/750 RP"右边还有
+            # "▶ 62 RP"（离下一段还差多少），"▶"没读出来时就是"62RP"
+            out["progress"] = wholes[0] if wholes else None
+        for emblem in self._spots(c["emblem"]):
+            out["emblem"] = next((roman(text) for text, score in self._lines(frame, emblem)
+                                  if score >= emblem["min_score"] and roman(text)), None)
+            if out["emblem"]:
                 break
         if out["tier"] is not None:
             if ranks.has_divisions(out["tier"]):
                 out["division"] = out["emblem"] or out["text_division"]
+                if out["progress"] is None:  # 斜杠读错了（4:3 常见）：用这一段的满分和右边"还差多少"拆开
+                    out["progress"] = split_progress(lines, ranks.division_size(out["tier"], out["division"]),
+                                                     wholes)
             out["score"] = ranks.score(out["tier"], out["division"], out["progress"])
-        n = c["name"]
-        out["name"] = read_name(self.engine, Snip(frame, n["roi"], c["base_resolution"], n.get("anchor")), n["left"], n["min_score"])
+        for n in self._spots(c["name"]):
+            out["name"] = read_name(self.engine, Snip(frame, n["roi"], c["base_resolution"], n.get("anchor")),
+                                    n["left"], n["min_score"])
+            if out["name"]:
+                break
         return out
 
 

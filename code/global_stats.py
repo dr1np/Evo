@@ -34,7 +34,7 @@ TIMEOUT = 15  # 秒：和匿名统计一样，国内有的网络到 Cloudflare �
 MAX_SIZE = 4 * 1024 * 1024
 FORMAT = 1  # 汇总的格式版本（服务器的 SUMMARY_NAME = v1）
 
-RANGES = {"all": "全部", "7d": "近 7 天"}  # 赛季以后再说（2026-10-24 用户决定；数据 10-22 才开始，"全部"就是本赛季）
+RANGES = {"season": "本赛季", "all": "全部", "7d": "近 7 天"}
 MODES = {"ranked": "排位", "pubs": "匹配"}
 TIERS = {"all": "全部段位", "low": "白金及以下", "diamond": "钻石", "master": "大师以上"}  # 只有排位分段位
 TIER_ORDER = ("菜鸟", "青铜", "白银", "黄金", "白金", "钻石", "大师", "Apex 猎杀者")
@@ -114,9 +114,16 @@ def fetch(now=None):
 
 # ---------- 页面上显示的 ----------
 
-def choose(args):
-    """网址里的筛选条件 → (范围, 模式, 段位)。不认识的用默认（全部、排位、全部段位）；匹配不分段位。"""
-    range_key = args.get("range") if args.get("range") in RANGES else "all"
+def ranges(summary=None):
+    """旧版汇总没有赛季切片，继续用原有范围。"""
+    has_season = bool(summary and summary.get("season_from") and "season.ranked.all" in summary["slices"])
+    return {key: label for key, label in RANGES.items() if key != "season" or has_season}
+
+
+def choose(args, summary=None):
+    """网址里的筛选条件 → (范围, 模式, 段位)。支持赛季的汇总优先显示本赛季。"""
+    available = ranges(summary)
+    range_key = args.get("range") if args.get("range") in available else next(iter(available))
     mode = args.get("mode") if args.get("mode") in MODES else "ranked"
     tier = args.get("tier") if mode == "ranked" and args.get("tier") in TIERS else "all"
     return range_key, mode, tier
@@ -131,6 +138,10 @@ def _mine(rows, summary, range_key, mode, tier):
     start = None
     if range_key == "7d":
         start = summary.get("recent_from") or (date.today() - timedelta(days=6)).isoformat()
+    elif range_key == "season":
+        start = summary.get("season_from")
+        if not start:
+            return []
     return [r for r in rows if _mode_of(r) == mode
             and (start is None or (r["ended_at"] or "")[:10] >= start)
             and (tier == "all" or TIER_GROUP.get(r["rank_tier"]) == tier)]
@@ -271,6 +282,7 @@ def page(summary, rows, mates, range_key, mode, tier, your_tier=None, icons=None
         "weapons": weapon_rows, "weapon_games": part.get("weapon_games", 0),
         "you_games": you["games"], "tiles": tiles,
         "tiers": tier_rows, "tier_players": spread.get("players", 0), "your_tier": your_tier,
+        "season_from": summary.get("season_from"),
     }
 
 

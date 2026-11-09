@@ -46,7 +46,7 @@
     }
     function matchLink(r) {
       const link = el('a', '查看这局 →');
-      link.href = `/matches?page=${encodeURIComponent(r.page || 1)}&open=${encodeURIComponent(r.id)}#m${encodeURIComponent(r.id)}`;
+      link.href = `/matches?range=all&page=${encodeURIComponent(r.page || 1)}&open=${encodeURIComponent(r.id)}#m${encodeURIComponent(r.id)}`;
       return link;
     }
     function detail(target, r) {

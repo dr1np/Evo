@@ -30,7 +30,9 @@
 - 经验值页和总结页对不上（名次不同、计分击杀比总结页多、时间相差太久），说明不是同一局：单独记一局并标记待确认
 - 开局画面读到的模式和地图、对局中认出的传奇，属于接下来这一局：存这一局时一起写进去。
   开局画面没读出模式、但有 RP 的局，记为排位（只有排位赛才有排位点数）
-- 队友：名字和传奇以对局中左下角为准，总结页（ID 和这一局的数据）按名字对上（_merge_mates）
+- 队友：名字和传奇以对局中左下角为准，总结页（ID 和这一局的数据）按名字对上（_merge_mates）。
+  总结页上的队友、自己的名字、顶部"捍卫者"先留着，回到大厅、下一局开局时再读（2026-11-01，on_summary_later），
+  在对局中的数据交来之前
 - 玩家名（区分账号用，见 player_name.py）：整次记录通用，不随每局清掉（换账号要重启游戏）。
   存一局时还不知道名字的，等认出名字后补上
 - 一局彻底结束（finish）时调用 on_round_end：记录程序在这里删掉不需要的截图（见 screenshots.py）
@@ -42,7 +44,6 @@ from paths import data_relative
 
 SOURCE_SUMMARY, SOURCE_XP, SOURCE_ELIM = "总结页", "经验值页", "淘汰画面"  # 读数来源（readings 表的 source）
 SOURCE_CHAMPION, SOURCE_HUD, SOURCE_LOBBY = "冠军横幅", "对局中", "大厅校准"
-RP_SOURCE_XP = SOURCE_XP
 PLACEMENT_SOURCES = (SOURCE_SUMMARY, SOURCE_XP, SOURCE_CHAMPION, SOURCE_ELIM)  # 互相核对；对不上时先用排在前面的
 XP_FIELDS = ("rp_delta", "placement", "kills", "assists", "rank_tier", "rank_division", "rank_progress")
 HUD_FIELDS = ("kills", "assists", "participation", "damage")  # 对局中右上角读到就记（成盒以后读不到，用成盒前的）
@@ -63,6 +64,9 @@ MAX_GAP_SECONDS = 600  # 同一局的总结页和经验值页，时间不会相�
 SAME_MATCH_SECONDS = 120  # 总结页、经验值页之后这么久之内看到的淘汰画面等算同一局（新的一局从排队到被淘汰，至少要这么久）
 MODE_LABELS = {"ranked": "排位", "pubs": "匹配", "other": "其他"}
 MATE_SIMILAR = 0.6  # 对局中和总结页的队友名字这么像就算同一个人（名字里有游戏显示不了的字，两边可能读得不一样）
+# 自己的名字：一个是另一个的开头、短的至少这么多个字（不管空格），才当作被截短了（游戏只截短长名字；
+# 太短的可能真是两个账号，如 "Bob" 和 "Bobby"）
+TRUNCATED_NAME_MIN = 8
 END_LABELS = {"eliminated": "淘汰画面", "champion": "冠军横幅", "summary": "总结页", "xp": "经验值页",
               "lobby": "回到大厅", "next": "下一局开局", "stop": "停止记录"}
 
@@ -92,7 +96,11 @@ def xp_conflicts(reading, xp_time, summary, summary_time):
 
 def rank_text(reading):
     if reading["rank_tier"] is None:
-        return "-"
+        # 经验值页的段位没读到：写出那两行读成了什么，下次看日志就知道原因（2026-11-04：16:9 测试员 7 局里 5 局"段位 -"，
+        # 诊断包里缩小的截图却读得出，原尺寸的经验值页又没截到，查不出是哪一行读错了）
+        raw = reading.get("raw") or {}
+        seen = [f"{label}'{raw[k]}'" for k, label in (("next_rank", "下一段位"), ("progress", "段内进度")) if raw.get(k)]
+        return f"-（没读到：{'、'.join(seen) or '两行都没读到'}）" if raw else "-"
     return f"{ranks.rank_name(reading['rank_tier'], reading['rank_division'])} {reading['rank_progress']}"
 
 
@@ -236,6 +244,7 @@ class PostMatch:
         self.player_name = None  # 这次记录认出的玩家名
         self.name_slip = name_slip  # 和之前的名字这么像，就当作识别误差（见 config/player_name.json）
         self.unnamed = []  # 这次记录里存下时还不知道玩家名的局，认出名字后补上
+        self.saved = []  # 这次记录里存下的所有局（之前记的名字原来是截短的，改成完整的时用）
         self.last_xp = None  # 上一次用过的经验值页读数（补进了一局或单独记了一局），不随每局清掉
         self.reset()
 
@@ -287,10 +296,25 @@ class PostMatch:
         """读到自己的玩家名之后调用（where：在哪读到的，写日志用）。
         - 第一次读到：记下，并补上这次记录里之前存下、还不知道名字的局
         - 和之前的一样（不管空格）：不用管
+        - 一个是另一个的开头（2026-11-04：总结页卡片上名字太长时游戏会截短，"Asuna[dkaldad"）：记完整的那个；
+          之前记的是截短的，这次记录里已经存下的局改成完整的（以前存下的局不动：账号对照表会照常问是不是同一个人）
         - 和之前的很像：当作识别误差，仍用之前的名字
         - 完全不一样：换了账号（用终端运行时，一次记录可能跨过重启游戏），之后的局记在新名字下"""
         old = self.player_name
         if old is not None and storage.name_key(name) == storage.name_key(old):
+            return
+        full = storage.truncated_of(name, old) if old is not None else None
+        if full is not None and len(storage.name_key(old if full == name else name)) >= TRUNCATED_NAME_MIN:
+            if full == old:
+                self.log(f"[{when:%H:%M:%S}] {where}读到玩家名 {name}，是 {old} 被截短了，仍记在 {old} 下")
+                return
+            self.player_name = full
+            fixed = [m for m in self.saved
+                     if (row := storage.get_match(self.conn, m)) is not None and row["player_name"] == old]
+            for match_id in fixed:
+                storage.update_match(self.conn, match_id, {"player_name": full})
+            self.log(f"[{when:%H:%M:%S}] {where}读到玩家名 {full}，之前的 {old} 是被截短的，改记 {full}"
+                     + (f"（这次记录里的 {len(fixed)} 局也改过来：编号 {'、'.join(map(str, fixed))}）" if fixed else ""))
             return
         if old is not None and storage.name_similarity(name, old) >= self.name_slip:
             self.log(f"[{when:%H:%M:%S}] {where}读到玩家名 {name}，和 {old} 很像，当作识别误差，仍记在 {old} 下")
@@ -375,18 +399,47 @@ class PostMatch:
         self._settle(match_id)
         self._use_xp()
 
+    def on_summary_later(self, match_id, when, mates, name, champion):
+        """总结页上先留着、晚点才读的（2026-11-01，见 live_collect.SummaryWatcher.catch_up）：两名队友、自己的名字（没读到为 None）、
+        顶部是不是"捍卫者"。一般在对局中的数据交来之前读（队友等它来了再对上）；已经交来了就马上对上。
+        万一这一局已经收尾了（没认出大厅、开局画面就进了下一局），也补进那一局。"""
+        if name is not None:
+            before = self.player_name
+            self.on_player_name(name, when, "总结页")
+            if self.player_name != before:  # 第一次认出、或者换了账号：这一局记在新名字下
+                storage.update_match(self.conn, match_id, {"player_name": self.player_name})
+        storage.save_teammates(self.conn, match_id, mates)
+        current = match_id == self.match_id
+        if current and self.hud is not None:
+            self._merge_mates(match_id)
+        if champion and current:
+            self.on_champion(when, SOURCE_SUMMARY)
+        elif champion:
+            self.log(f"[{when:%H:%M:%S}] 总结页：捍卫者（冠军），记第 1 名（编号 {match_id}）")
+            storage.save_readings(self.conn, match_id, SOURCE_CHAMPION, {"placement": 1}, f"{when:%Y-%m-%d %H:%M:%S}")
+            self._settle(match_id)
+
+    def xp_pending(self):
+        """这一局有别的数据（总结页、对局中、淘汰画面、冠军），经验值页还没用上：这时屏幕上的经验值页就是这一局的，
+        RP 一对上就能先响提示音（见 live_collect.ScreenWatcher）。没有别的数据时可能是在大厅里重新打开的上一局，等读完整页再说。"""
+        return not self.xp_done and any(x is not None for x in (self.match_id, self.hud, self.hud_end, self.elim,
+                                                                 self.champion))
+
     def on_xp(self, reading, problems, path, when):
-        """每次离开经验值页、识别了最后一帧之后调用。"""
+        """识别了一张经验值页之后调用：数字停下来的那一张，或者离开时的最后一帧（见 live_collect.ScreenWatcher）。
+        返回 True：这一局第一次读全（"经验值页"那一声在这时响，2026-11-04 用户决定）。"""
         if self.xp_done:
-            return
+            return False
         if self._reopened_xp(reading):
             self.log(f"[{when:%H:%M:%S}] 回到了上一局的经验值页（在大厅里打开的），不重复记")
-            return
+            return False
+        first_full = not problems and (self.xp is None or bool(self.xp[1]))
         if self.xp is None or xp_score(reading, problems) > xp_score(*self.xp[:2]):
             self.xp = (reading, problems, path, when)
         if self.xp[1]:  # 到目前为止还没有一次读全
             self.log(f"[{when:%H:%M:%S}] 经验值页没读全（{problems[0]}）。下次等数字停下再离开")
         self._use_xp()
+        return first_full
 
     def finish(self):
         """这一局彻底结束（下一局开局、回到大厅，或停止运行）。没有总结页的局在这里单独记一局。
@@ -431,6 +484,7 @@ class PostMatch:
 
     def _wait_for_name(self, match_id):
         """刚存下一局：还不知道玩家名的话，记下编号，认出名字后补上。"""
+        self.saved.append(match_id)
         if self.player_name is None:
             self.unnamed.append(match_id)
 
@@ -493,7 +547,8 @@ class PostMatch:
 
     def _merge_mates(self, match_id):
         """对局中认出的队友（名字、传奇）和总结页上的队友（名字、ID、数据）按名字对上。
-        名字以对局中的为准（2026-10-18 用户决定），总结页的补空；对不上的只在日志里记一笔。没有总结页的局，记成 hud1、hud2。"""
+        名字以对局中的为准（2026-10-18 用户决定），总结页的补空；一个是另一个的开头（有一边被截短了，2026-11-04）时
+        算同一个人、记长的那个。对不上的只在日志里记一笔。没有总结页的局，记成 hud1、hud2。"""
         hud_mates = [m for m in (self.hud["mates"] if self.hud else []) if m["name"] or m["legend"]]
         if not hud_mates:
             return
@@ -504,7 +559,8 @@ class PostMatch:
         free = list(range(len(hud_mates)))
         pairs = []
         for row in rows:
-            scores = [(storage.name_similarity(hud_mates[i]["name"], row["name"]), i) for i in free
+            scores = [(1.0 if storage.truncated_of(hud_mates[i]["name"], row["name"])
+                       else storage.name_similarity(hud_mates[i]["name"], row["name"]), i) for i in free
                       if hud_mates[i]["name"] and row["name"]]
             best = max(scores, default=None)
             if best and best[0] >= MATE_SIMILAR:
@@ -517,9 +573,14 @@ class PostMatch:
         for row, mate in pairs:
             fields = {"legend": mate["legend"]}
             if mate["name"]:
-                if row["name"] and storage.name_key(mate["name"]) != storage.name_key(row["name"]):
-                    self.log(f"           队友名字：对局中读到 {mate['name']}，总结页读到 {row['name']}，记对局中的")
                 fields["name"] = mate["name"]
+                if row["name"] and storage.name_key(mate["name"]) != storage.name_key(row["name"]):
+                    full = storage.truncated_of(mate["name"], row["name"])
+                    if full:
+                        fields["name"] = full
+                    which = "对局中的" if fields["name"] == mate["name"] else "总结页的"
+                    self.log(f"           队友名字：对局中读到 {mate['name']}，总结页读到 {row['name']}，记{which}"
+                             + ("（另一边被截短了）" if full else ""))
             storage.update_teammate(self.conn, match_id, row["slot"], {k: v for k, v in fields.items() if v})
         for i in free:
             self.log(f"           对局中的队友 {hud_mates[i]['name'] or '（名字没读到）'}"

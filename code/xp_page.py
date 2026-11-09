@@ -14,8 +14,12 @@ import argparse
 import re
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 import game_lang
 import ranks
+from layout import cut
 from ocr import SMALL_CROP_PARAMS, create_engine, crop, load_config, load_image, read_lines
 
 CONFIG_NAME = "xp.json"
@@ -42,6 +46,24 @@ def read_text(engine, img, spec, cfg):
     return normalize(text), score
 
 
+def numbers_snapshot(img, cfg):
+    """经验值页上读的那几格（cfg 的 fields，只看主区域）缩小成灰度：用来看数字停下来没有（不用识别引擎，约 1 毫秒）。"""
+    parts = []
+    for spec in cfg["fields"].values():
+        anchor = spec.get("anchor")
+        piece = cut(img, spec["roi"], cfg["base_resolution"], cfg.get("anchor") if anchor is None else anchor)
+        _, _, w, h = spec["roi"]
+        gray = cv2.cvtColor(piece, cv2.COLOR_BGR2GRAY)
+        parts.append(cv2.resize(gray, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA))
+    return parts
+
+
+def numbers_moved(a, b, cfg):
+    """两张的那几格差得多不多：有一格平均差超过 still.max_diff（0–255 的灰度）就算还在动。"""
+    limit = cfg["still"]["max_diff"]
+    return any(float(np.mean(cv2.absdiff(x, y))) > limit for x, y in zip(a, b))
+
+
 def split_count_points(digits):
     """次数和分数连在一起时（如 "18" = 1 次 8 分），找出唯一合理的拆法：分数 = 次数 × 每次的分值（1–40）。"""
     options = []
@@ -55,17 +77,19 @@ def split_count_points(digits):
 def current_rank(next_text, names=None):
     """由"下一段位：钻石 I"推出当前段位（钻石, II）；"下一段位：大师" → (钻石, I)；
     "下一段位：Apex 猎杀者" → (大师, None)（大师不分段）。段位名和顺序见 config/ranks.json。读不懂返回 None。
+    段位名在这一行里哪儿都行，后面跟着段：第 31 赛季起写成"43 RP ▶ 黄金 IV"（还差多少分 ▶ 下一段位）。
     names：画面上的段位名 → 简体段位名（ranks.tier_names，别的语言如 "Diamond"）；不给就是简体。"""
-    name = next_text.split(":")[-1].replace(" ", "")
+    text = next_text.split(":")[-1].replace(" ", "")
+    name = text.lower()
     tiers, divisions = ranks.TIERS, ranks.DIVISIONS
     names = names or ranks.tier_names()
     keys = {shown: shown.replace(" ", "").lower() for shown in names}  # 比较时不管空格和大小写（"Apex猎杀者"）
-    shown = next((s for s in sorted(names, key=lambda s: len(keys[s]), reverse=True)
-                  if name.lower().startswith(keys[s])), None)
-    if shown is None:
+    found = [(name.find(keys[s]), -len(keys[s]), s) for s in names if keys[s] in name]
+    if not found:
         return None
+    start, _, shown = min(found)  # 最靠前的段位名；同一位置取最长的
     tier = names[shown]
-    roman = "".join(ROMAN.get(c, c) for c in name[len(keys[shown]):])
+    roman = "".join(ROMAN.get(c, c) for c in text[start + len(keys[shown]):])  # 段（大小写不变："IV"）
     t = tiers.index(tier)
 
     def top_of_previous():  # 当前是上一个段位的最高段（不分段的段位没有段）
@@ -84,15 +108,42 @@ def current_rank(next_text, names=None):
     return (tier, divisions[d - 1]) if d > 0 else top_of_previous()
 
 
-def read_xp(engine, img, cfg):
-    """识别一张经验值页。返回 (结果, 问题列表)。结果里读不出的项为 None。"""
-    raw = {}
-    for name, spec in cfg["fields"].items():
-        text, score = read_text(engine, img, spec, cfg)
+def read_field(engine, img, name, spec, cfg):
+    """读一项，返回文字（置信度不够为 ""）。这一项写了 pattern（格式）时，读到的不合格式就依次再读 also 里的
+    几处（每处只写和主区域不一样的项，如第 30 赛季的位置和写法，见 xp.json），都不合格式返回 ""。"""
+    for spot in [spec, *({**spec, **other} for other in spec.get("also", []))]:
+        text, score = read_text(engine, img, spot, cfg)
         if name != "next_rank":  # 数字那几行修正常见误读（英文把"0 RP"读成"O RP"）；段位名不改（"BRONZE"里有 O）
             for wrong, right in cfg.get("replace", {}).items():
                 text = text.replace(wrong, right)
-        raw[name] = text if score is not None and score >= cfg["min_score"] else ""
+        text = text if score is not None and score >= cfg["min_score"] else ""
+        if "pattern" not in spot or re.match(spot["pattern"], text):
+            return text
+    return ""
+
+
+RP_FIELDS = ("rp_shown", "combat_total", "bonus_total", "placement_total")  # 顶部的数字和三个合计
+
+
+def read_rp(engine, img, cfg):
+    """只读 RP 那四格（顶部的数字和三个合计，约整页的四成时间）：三个合计加起来等于顶部的数字才算读到。
+    返回 (RP 或 None, 这四格读到的原文：交给 read_xp 的 known，不用再读一遍)。
+    "排位分数已记录"那一声先看它：读整页、存截图要将近一秒，玩家看到数字停了常常马上就走（2026-11-04）。"""
+    raw = {name: read_field(engine, img, name, cfg["fields"][name], cfg) for name in RP_FIELDS}
+    parts = [re.match(cfg["patterns"]["points"], raw[name]) for name in RP_FIELDS[1:]]
+    shown = re.fullmatch(r"[+-]?\d+", raw["rp_shown"])
+    if shown is None or None in parts:
+        return None, raw
+    total = sum(int(m[1]) for m in parts)
+    return (total if total == int(shown[0]) else None), raw
+
+
+def read_xp(engine, img, cfg, known=None):
+    """识别一张经验值页。返回 (结果, 问题列表)。结果里读不出的项为 None。
+    known：已经读过的几格的原文（read_rp 读的那四格），不再读一遍。"""
+    known = known or {}
+    raw = {name: known[name] if name in known else read_field(engine, img, name, spec, cfg)
+           for name, spec in cfg["fields"].items()}
     patterns = cfg["patterns"]
     glued = cfg.get("split_glued", True)  # 次数和分数连在一起时（"00排位点数"）去拆；英文中间隔得远，不会连在一起，不拆
 

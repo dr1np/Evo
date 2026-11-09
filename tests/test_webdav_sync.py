@@ -1,6 +1,6 @@
 """WebDAV 同步（webdav_sync.py、storage.py 的同步列、设置页）。
 
-- 数据库第 10 版：matches / lobby_readings 加 sync_uid、sync_updated，新增 sync_tombstones；旧库自动升级
+- 数据库第 11 版：matches / lobby_readings 加 sync_uid、sync_updated，新增 sync_tombstones；旧库自动升级
 - 旧数据第一次同步时补编号；同一个数据库复制成两份后编号一样（合并时不会变成两局）
 - 快照：每台电脑一个 gzip JSON；导出/读回来；格式不对、坏文件跳过
 - 合并：只加、只更新；两边都改了按逻辑版本确定结果；删除用墓碑，墓碑优先；
@@ -303,8 +303,8 @@ def database_checks():
     conn = open_db(folder)
     match_cols = {r[1] for r in conn.execute("PRAGMA table_info(matches)")}
     lobby_cols = {r[1] for r in conn.execute("PRAGMA table_info(lobby_readings)")}
-    out["新数据库是第 10 版：两张表有同步列，新增 sync_tombstones"] = (
-        conn.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 10
+    out["新数据库是第 11 版：两张表有同步列，新增 sync_tombstones"] = (
+        conn.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 11
         and {"sync_uid", "sync_updated"} <= match_cols
         and {"sync_uid", "sync_updated"} <= lobby_cols
         and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_tombstones'").fetchone())
@@ -352,7 +352,7 @@ def database_checks():
     raw.close()
     conn = storage.connect(db)
     out["第 8 版的旧库自动升级：原来的数据不动，两列都补上"] = (
-        conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        conn.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION
         and tuple(conn.execute("SELECT placement, player_name FROM matches").fetchone()) == (2, "老玩家")
         and {"sync_uid", "sync_updated"} <= {r[1] for r in conn.execute("PRAGMA table_info(matches)")}
         and {"sync_uid", "sync_updated"} <= {r[1] for r in conn.execute("PRAGMA table_info(lobby_readings)")}

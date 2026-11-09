@@ -2,7 +2,9 @@
 规则见 docs/对局全流程图.md。
 
 只截屏，不碰游戏（唯一的例外：读 Apex 自己的视频设置文件，知道游戏画面是 16:9、16:10 还是 4:3，见 game_aspect.py）。
-每截一张，先判断是哪个画面（见 screens.py：先比外观，几毫秒；像了才用识别引擎读关键字确认），
+截屏见 capture.py（dxcam；双显卡的笔记本上先把 Evo 设成「节能」，还不行改用 mss）。
+每截一张，先判断是哪个画面（见 screens.py：先比外观，几毫秒；像了才用识别引擎读关键字确认，
+停在同一个画面上、关键字那一块没变就不再读），
 再交给对应的部分。识别引擎（OCR）用到时才加载，闲置 2 分钟后释放；对局中交火时一律不用引擎（原则 3）：
 - 大厅：读玩家名、段位和段内分数，连续两次一样就记下，并用它校准前后两次大厅之间各局的 RP（见 lobby.py、calibration.py）。
   回到大厅也算上一局结束
@@ -13,18 +15,18 @@
   自己先成盒、队友还活着时没有这个按钮）：这一局结束了。对局中存下的右上角（击杀、助攻、老板分、伤害、RP、剩余小队数）
   和队友名字等回到大厅、下一局开局时再读，交给 PostMatch（见 in_match.py）
   - 淘汰画面：读名次，读到就不再读（见 eliminated.py）；冠军横幅：记第 1 名
-  - 总结页：改成每 0.3 秒检查一次，读全了就存一局（见 SummaryWatcher），同一帧再读左右两张卡片上的队友
-    （见 teammates.py）、中间卡片上自己的名字、顶部是不是"捍卫者"
-  - 经验值页：离开时识别最后一帧（数字有动画，最后一帧才是最终结果），补上 RP、段位
+  - 总结页：改成每 0.3 秒检查一次，读全了就存一局（见 SummaryWatcher；没变的项不重读）。左右两张卡片上的队友
+    （见 teammates.py）、中间卡片上自己的名字、顶部是不是"捍卫者"先把截图留着，回到大厅、下一局开局时再读（2026-11-01）
+  - 经验值页：每 0.3 秒截一张，离开时识别最后一帧（数字有动画，最后一帧才是最终结果），补上 RP、段位
   - 停在总结页、还没存下时只读总结页（2026-10-27 用户决定：笔记本上读一次要好几秒，玩家常常没等读完就离开了）：
     对局中存下的右上角见上；从经验值页切到总结页时，经验值页的最后一帧先留着，总结页存下了（或者离开了）再读
 - 各来源读到的数都记进 readings 表，每一项最后用哪个来源的数见 post_match.py（总结页、经验值页读得清楚时以它们为准，
   没有时用对局中的）
-- 提示音（见 SoundCues、sounds.py；设置页能关）：小队打完了响一声提醒去总结页，总结页读完了响一声，进经验值页响一声
+- 提示音（见 SoundCues、sounds.py；设置页能关）：小队打完了响一声提醒去总结页，总结页读完了响一声，经验值页读全了响一声
 - 读结算画面、大厅时不让 Windows 降频（见 FullSpeed）：笔记本上识别可能慢 10 倍以上，玩家等不到提示音就离开了
 
 数据存在数据文件夹（见 paths.py；用源码运行时就是项目文件夹）的 data/evo.db（用 python code/storage.py 查看），
-截图存在 captures/live/<开始时间>/。截图留不留见 screenshots.py：
+截图存在 captures/live/<开始时间>/<画面类型>/（summary、xp、hud……，见 screenshots.SHOT_TYPES）。截图留不留见 screenshots.py：
 - 默认识别完就删：只存总结页、经验值页（离开前最后一帧），一局结束时只留总结页截图（转成 JPG）和"待确认"的局要用的
 - 保留全部截图（攒测试集用；用源码运行时永远保留全部）：经验值页、开局画面、大厅、淘汰画面、冠军横幅也存，
   进入时一张、离开前最后一帧一张；每局结束时还存最后一张自己的界面（hud_时间_last.png，校准对局中的区域用）
@@ -43,10 +45,11 @@ from pathlib import Path
 from time import perf_counter, process_time  # 单独导入：测试会把本文件的 time 换成假时钟，这两个仍是真的
 
 import cv2
-import dxcam
 
+import capture
 import game_lang
 import screenshots
+import season_import
 import sounds
 import storage
 from eliminated import read_eliminated
@@ -63,7 +66,7 @@ from process_info import memory_mb, set_full_speed, set_low_priority
 from screens import GameScreens
 from summary_page import KEY_FIELDS, is_champion, read_summary, show, summary_readings, summary_to_match
 from teammates import describe, read_teammates
-from xp_page import read_xp
+from xp_page import numbers_moved, numbers_snapshot, read_rp, read_xp
 
 LATE_FIELDS = ("placement", "squad_kills")  # 总结页上晚 1–2 秒才滑进来的项
 MODEL_IDLE_SECONDS = 120  # 识别模型闲置这么久就释放
@@ -87,7 +90,12 @@ def save_png(path, frame):
 class SummaryWatcher:
     """总结页：名次、击杀/助攻/击倒、伤害都读到了，并且连续两次相同（名次会晚 1–2 秒滑进来，数字也可能有动画），
     就保存截图、把这一局写进数据库（冠军的总结页没有名次：其他数字连续两次相同、顶部是"捍卫者"就算读全）。还没读全就离开了、等太久、或者停止记录时，用读得最全的一次存下，标记"待确认"
-    （缺的项之后能用别的来源补上就取消，见 post_match.settle）。在总结页和别的画面之间来回切换，同一局不重复存。"""
+    （缺的项之后能用别的来源补上就取消，见 post_match.settle）。在总结页和别的画面之间来回切换，同一局不重复存。
+    同一次停留里，和上一张比没变的项不再识别、沿用上次的（2026-11-01，见 summary_page.read_field）：
+    数字停住了，第二张几乎不用读，名次滑进来时只重读名次那几项。
+    存下时只读自己的数据（2026-11-01 用户同意）：两名队友、自己的名字、顶部是不是"捍卫者"先把截图留在内存里，
+    回到大厅、下一局开局时再读（catch_up）。笔记本上读这些要 5–7 秒，读的时候不截图，玩家翻到经验值页、
+    离开都截不到（经验值页最后一帧还在动画里，RP 明细读不全，见 docs/识别经验.md）。"""
 
     def __init__(self, engine, cfg, conn, post, run_dir, log, timeout, names=None, on_read=None):
         """on_read(时间)：关键项读全、连续两次相同时调用（总结页读完了的提示音）；没读全就离开、等太久都不调用。"""
@@ -96,9 +104,11 @@ class SummaryWatcher:
         self.on_read = on_read
         self.saved = 0  # 这次记录存下了几局
         self.name_reads = 0  # 读了几次中间卡片上的名字（统计用）
-        self.visit = None  # 这一次停在总结页的情况：开始时间、上一次的读数、读得最全的一次
+        self.fields_read, self.fields_reused = 0, 0  # 总结页上识别了几项、没变沿用了几项（统计用）
+        self.visit = None  # 这一次停在总结页的情况：开始时间、上一次的读数、读得最全的一次、每一项上次读的那一小块
         self.done = False  # 这一次总结页已经存过了
         self.last_saved = None  # 最近存进数据库的那一局的读数（切到别的页再切回来时，用来认出是同一局）
+        self.later = []  # 存下了、还没读队友和名字的总结页（编号、截图、时间、每一项上次读的那一小块、要不要看"捍卫者"）
 
     @property
     def waiting(self):
@@ -115,9 +125,12 @@ class SummaryWatcher:
         if self.done:
             return
         if self.visit is None:
-            self.visit = {"start": time.monotonic(), "last": None, "best": None, "core_stable": False}
+            self.visit = {"start": time.monotonic(), "last": None, "best": None, "core_stable": False, "memo": {}}
         visit = self.visit
-        results, problems = read_summary(self.engine, frame, self.cfg)
+        results, problems = read_summary(self.engine, frame, self.cfg, memo=visit["memo"])
+        reused = sum(bool(r.get("reused")) for r in results.values())
+        self.fields_reused += reused
+        self.fields_read += len(results) - reused
         values = {name: r["value"] for name, r in results.items()}
         filled = sum(v is not None for v in values.values())
         if visit["best"] is None or filled >= visit["best"][0]:
@@ -132,9 +145,9 @@ class SummaryWatcher:
         # 冠军的总结页顶部是"捍卫者"、没有"第 X 名"，名次永远读不到：其他数字稳定了就算读完（第 1 名由冠军横幅补上，
         # 和以前离开时才存一样，只是存得早，"总结页读完了"的提示音也能响）
         champion = (not complete and visit["core_stable"] and values["placement"] is None and "banner" in self.cfg
-                    and is_champion(self.engine, frame, self.cfg))
+                    and is_champion(self.engine, frame, self.cfg, visit["memo"]))
         if (complete and values == visit["last"]) or champion:  # 关键项都读到了，且连续两次相同
-            self._record(results, problems, frame, now)
+            self._record(results, problems, frame, now, champion=champion)
             self.done = True
             if self.on_read is not None:
                 self.on_read(now)
@@ -149,15 +162,35 @@ class SummaryWatcher:
             self._record_best("总结页停留太短，名次等数据可能没读全，请核对")
             self.done = True
 
-    def _record(self, results, problems, frame, when, note=None):
-        """把一次总结页的读数存进数据库。如果和上一局是同一局（来回切页），就不重复存。"""
+    def catch_up(self):
+        """读存下时先留着的：两名队友、自己的名字、顶部是不是"捍卫者"，交给 PostMatch（on_summary_later）。
+        回到大厅、下一局开局、对局中认出了新的一局、停止记录时调用，要在对局中的数据交给 PostMatch 之前（队友要和它对上）。"""
+        while self.later:
+            job = self.later.pop(0)
+            frame, when = job["frame"], job["when"]
+            mates = read_teammates(self.engine, frame, self.cfg)  # 读不准的项留空，不因为队友标待确认
+            for mate in mates:
+                self.log(f"           队友 {describe(mate)}")
+            name = None
+            if self.names is not None:
+                self.name_reads += 1
+                found = self.names.read(frame, "summary")
+                name = found[0] if found else None
+            champion = job["banner"] and is_champion(self.engine, frame, self.cfg, job["memo"])
+            self.post.on_summary_later(job["match_id"], when, mates, name, champion)
+
+    def _record(self, results, problems, frame, when, note=None, champion=False):
+        """把一次总结页的读数存进数据库（只是自己的数据；队友、名字等 catch_up 再读）。如果和上一局是同一局（来回切页），就不重复存。
+        champion：已经看过顶部，是"捍卫者"（冠军的总结页没有名次，存之前要看）。"""
         values = {name: r["value"] for name, r in results.items()}
         if same_match(values, self.last_saved):
             self.log(f"[{when:%H:%M:%S}] 回到了同一局的总结页，不重复保存")
             return
         if note:
             problems = problems + [note]
-        image_path = self.run_dir / f"{self.saved + 1:02d}_{when:%H%M%S}.png"
+        name = f"{self.saved + 1:02d}_{when:%H%M%S}.png"
+        image_path = screenshots.path_for(self.run_dir, name)
+        image_path.parent.mkdir(parents=True, exist_ok=True)
         save_png(image_path, frame)
         match = summary_to_match(results, problems, f"{when:%Y-%m-%d %H:%M:%S}", image_path)
         match_id = storage.insert_match(self.conn, match)
@@ -169,18 +202,12 @@ class SummaryWatcher:
                  f"击杀/助攻/击倒 {show(values['kda'])}，伤害 {show(values['damage'])}")
         for p in problems:
             self.log(f"           ⚠ {p}")
-        mates = read_teammates(self.engine, frame, self.cfg)  # 读不准的项留空，不因为队友标待确认
-        storage.save_teammates(self.conn, match_id, mates)
-        for mate in mates:
-            self.log(f"           队友 {describe(mate)}")
-        name = None
-        if self.names is not None:
-            self.name_reads += 1
-            found = self.names.read(frame, "summary")
-            name = found[0] if found else None
-        self.post.on_summary_saved(match_id, values, when, name)
-        if "banner" in self.cfg and is_champion(self.engine, frame, self.cfg):
+        self.post.on_summary_saved(match_id, values, when)
+        if champion:
             self.post.on_champion(when, SOURCE_SUMMARY)
+        self.later.append({"match_id": match_id, "frame": frame.copy(), "when": when,
+                           "memo": self.visit["memo"] if self.visit else {},
+                           "banner": "banner" in self.cfg and not champion})
 
     def _record_best(self, note):
         """数字没等到读全：用这次停留里读得最全的一次存下（会标记待确认）。
@@ -195,7 +222,8 @@ class SoundCues:
       这一局已经到过总结页或经验值页就不响（已经在那里了，比如从总结页切回"实况"又看到"返回大厅"）；
       自己先成盒、队友还活着时没有这几个画面，不响；提前回大厅、成盒后直接进了下一局也不响
     - 总结页读完了：SummaryWatcher 读全、存下这一局时（summary_read）；停留太短没读全、等太久都不响
-    - 经验值页：进入时（数字有动画，离开时才读，没有"读完了"的那一刻）"""
+    - 经验值页：这一局的经验值页第一次读全时（xp_read，ScreenWatcher 告诉它：数字停下来读了那一张，或者离开时读最后一帧；
+      2026-11-04 用户决定，以前是一进经验值页就响，数字还在跳就说"已记录"）"""
 
     MATCH_END = ("eliminated", "champion", "squad_out")
 
@@ -218,12 +246,14 @@ class SoundCues:
             self._cue("match_end", now)
         elif screen in ("summary", "xp"):
             self.on_pages = True
-            if screen == "xp":
-                self._cue("xp", now)
 
     def summary_read(self, now):
         self.on_pages = True
         self._cue("summary", now)
+
+    def xp_read(self, now):
+        self.on_pages = True
+        self._cue("xp", now)
 
     def _cue(self, name, now):
         if name in self.played:
@@ -273,25 +303,38 @@ class FullSpeed:
 
 class ScreenWatcher:
     """经验值页、开局画面、大厅、淘汰画面、冠军横幅（见 config/screens.json）。
-    离开经验值页时识别最后一帧（数字有动画，最后一帧才是最终结果）；进入开局画面或大厅表示上一局彻底结束；
+    经验值页的数字有动画：数字停下来（xp.json 的 still：那几格的像素和上一张差不多，不用识别引擎）就先读 RP 那四格，
+    对上了马上告诉 on_read（响"经验值页"那一声，2026-11-04 用户决定），再读整页；这次停留没读全的话，
+    离开时再读最后一帧（读全了也响）。
+    进入开局画面或大厅表示上一局彻底结束；
     在开局画面读本局的模式和地图，读到就不再读；在淘汰画面读名次，这一次停留里读到就不再读，交给 PostMatch 归到这一局；
     进入冠军横幅告诉 PostMatch 记第 1 名。
-    截图：保留全部时，进入时存一张、离开前最后一帧再存一张；否则只存经验值页离开前的最后一帧
-    （没有总结页的局要拿它当识别依据），大厅、开局画面、淘汰画面、冠军横幅不存。"""
+    截图：保留全部时，进入时存一张、离开前最后一帧再存一张；经验值页读的每一张都存（没有总结页的局要拿它当识别依据，
+    读完以后照常清理），离开时的最后一帧只在要读它时存；大厅、开局画面、淘汰画面、冠军横幅不存。"""
 
     def __init__(self, engine, screens, xp_cfg, start_cfg, elim_cfg, post, run_dir, log, keep_all=True,
-                 busy=lambda: False):
-        """busy()：总结页正在读、还没存下。这时离开经验值页，最后一帧先留着，等 busy() 不再为真再读。"""
+                 busy=lambda: False, on_read=None):
+        """busy()：总结页正在读、还没存下。这时经验值页先不读（离开时的最后一帧先留着），等 busy() 不再为真再读。
+        on_read(时间)：这一局的经验值页第一次读全（提示音）。"""
         self.engine, self.screens, self.xp_cfg, self.start_cfg = engine, screens, xp_cfg, start_cfg
         self.elim_cfg = elim_cfg
         self.post, self.run_dir, self.log, self.keep_all = post, run_dir, log, keep_all  # 每局结束时可能改（round_end）
         self.busy = busy
+        self.on_read = on_read
         self.current = None  # 现在停在哪个画面（None = 都不是）
         self.last = None  # 这个画面最近的一帧和时间，离开时存下来
         self.frames = 0  # 在这个画面已经看到了几帧
         self.enter_path = None  # 进入这个画面时存的截图（没存为 None）
         self.placement = None  # 这一次停在淘汰画面读到的名次
         self.held = None  # 先留着、还没读的经验值页最后一帧：(截图, 截图路径, 时间)
+        self._reset_xp()
+
+    def _reset_xp(self):
+        """这一次停在经验值页的状态（进入别的画面时清掉）。时间用 time.monotonic()（测试时是假时钟）。"""
+        self.still = None  # 数字可能停下来的这一段：(开头那张的几格, 开头的时刻)
+        self.xp_reads = 0  # 这次停留读了几次
+        self.xp_read_at = None  # 上一次读的时刻
+        self.xp_full = False  # 这次停留读全了（离开时就不用再读最后一帧）
 
     def update(self, screen, frame, now):
         """每截一帧调用一次。screen：这一帧是哪个画面（如 "xp"），都不是则为 None。"""
@@ -304,33 +347,70 @@ class ScreenWatcher:
                 self.post.on_champion(now, SOURCE_CHAMPION)
             self.enter_path = None
             if screen is not None and self.keep_all:
-                self.enter_path = self.run_dir / f"{screen}_{now:%H%M%S}_enter.png"
+                name = f"{screen}_{now:%H%M%S}_enter.png"
+                self.enter_path = screenshots.path_for(self.run_dir, name)
+                self.enter_path.parent.mkdir(parents=True, exist_ok=True)
                 save_png(self.enter_path, frame)
                 self.log(f"[{now:%H:%M:%S}] 进入{self._label(screen)}，已存截图")
             elif screen is not None:
                 self.log(f"[{now:%H:%M:%S}] 进入{self._label(screen)}")
             self.current, self.frames, self.placement = screen, 0, None
+            self._reset_xp()
         if screen is not None:
             self.last = (frame.copy(), now)
             self.frames += 1
+        if screen == "xp":
+            self._watch_xp(frame, now)
         if screen == "match_start" and not self.post.info_complete():
             self.post.on_match_start(read_match_start(self.engine, frame, self.start_cfg), now)
         if screen == "eliminated" and self.placement is None:
             self._read_placement(frame, now)
 
     def leave(self):
-        """离开当前画面：存下最后一帧（保留全部时，只看到一帧的话进入时已经存过了；否则只存经验值页）；
-        如果是经验值页，识别最后一帧（总结页正在读时先留着）。"""
+        """离开当前画面：存下最后一帧（保留全部时，只看到一帧的话进入时已经存过了；否则只存要读的经验值页）；
+        如果是经验值页、这次停留还没读全，识别最后一帧（总结页正在读时先留着）。"""
         if self.current is not None:
             last_frame, last_time = self.last
             path = self.enter_path
-            if (self.frames > 1) if self.keep_all else (self.current == "xp"):
-                path = self.run_dir / f"{self.current}_{last_time:%H%M%S}_leave.png"
+            read_last = self.current == "xp" and not self.xp_full
+            if (self.frames > 1) if self.keep_all else read_last:
+                name = f"{self.current}_{last_time:%H%M%S}_leave.png"
+                path = screenshots.path_for(self.run_dir, name)
+                path.parent.mkdir(parents=True, exist_ok=True)
                 save_png(path, last_frame)
                 self.log(f"[{last_time:%H:%M:%S}] 离开{self._label(self.current)}，已存最后一帧")
-            if self.current == "xp":
+            if read_last:
                 self.held = (last_frame, path, last_time)
         self._read_held()
+
+    def _watch_xp(self, frame, now):
+        """停在经验值页：数字停下来了（那几格和这一段开头那张差不多、过了 still.seconds 秒）就读这一张。
+        先只读 RP 那四格：对上了、是这一局的，马上响提示音，再存截图、读整页（2026-11-04：读整页、存截图要将近一秒，
+        玩家看到数字停了常常马上就走，听起来像"切出去才响"）；四格对不上（动画还没播完）就不读整页，过一会儿再试。"""
+        rule = self.xp_cfg["still"]
+        tick = time.monotonic()
+        snapshot = numbers_snapshot(frame, self.xp_cfg)
+        if self.still is None or numbers_moved(self.still[0], snapshot, self.xp_cfg):
+            self.still = (snapshot, tick)  # 还在动：从这一张重新算
+            return
+        if (self.xp_full or tick - self.still[1] < rule["seconds"] - 0.01 or self.xp_reads >= rule["max_reads"]
+                or (self.xp_read_at is not None and tick - self.xp_read_at < rule["retry_seconds"]) or self.busy()):
+            return
+        self.xp_reads += 1
+        self.xp_read_at = tick
+        rp, known = read_rp(self.engine, frame, self.xp_cfg)
+        if rp is None:
+            return  # 顶部的数字和三个合计还对不上：动画多半还没播完
+        self.log(f"[{now:%H:%M:%S}] 经验值页的数字停下了，RP {rp:+d} 对上了")
+        if self.on_read is not None and self.post.xp_pending():
+            self.on_read(now)
+        path = screenshots.path_for(self.run_dir, f"xp_{now:%H%M%S}_still.png")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        save_png(path, frame)
+        reading, problems = read_xp(self.engine, frame, self.xp_cfg, known=known)
+        self.xp_full = not problems
+        if self.post.on_xp(reading, problems, path, now) and self.on_read is not None:
+            self.on_read(now)  # 这一局第一次读全（上面没响过的话，比如在大厅里打开的、只有经验值页的局）
 
     def _read_held(self):
         """识别先留着的经验值页最后一帧（总结页正在读时不读）。"""
@@ -339,7 +419,8 @@ class ScreenWatcher:
         frame, path, when = self.held
         self.held = None
         reading, problems = read_xp(self.engine, frame, self.xp_cfg)
-        self.post.on_xp(reading, problems, path, when)
+        if self.post.on_xp(reading, problems, path, when) and self.on_read is not None:
+            self.on_read(when)
 
     def _read_placement(self, frame, now):
         """读淘汰画面上的名次。没读出来时只在第一帧提示一次，之后每帧再试。"""
@@ -353,6 +434,123 @@ class ScreenWatcher:
 
     def _label(self, screen):
         return self.screens["screens"][screen]["label"]
+
+
+class SeasonWatcher:
+    """录入历史赛季数据（2026-11-01 用户定的，见 season_import.py、season_stats.py）：设置页按了"录入历史赛季数据"以后
+    的几分钟里，认出游戏里的数据页（右边的下拉菜单收着）就读，存成待核对，玩家在 Evo 窗口的"赛季"页面核对、保存：
+    - 右边一栏（玩家在下拉菜单里选的赛季）：连续两张读到的一样（刚切过来数字可能还在变）、没被鼠标弹出的说明框挡住，
+      就存下、响一声（"总结页读完了"那一声）。这一次录入里读过、数字没变的不再存、不再响；0 局的赛季不记
+    - 中间一栏（大逃杀生涯合计）：同样连续两张一样就存，每次录入存一次
+    - 只读自己的：页面上的名字要是 Evo 认识的自己的名字（对局里出现过的）；Evo 还没记过一局时都算自己的
+    对局中不读。认这一页、读数都只在录入模式里做，平时一点不多花。"""
+
+    OWNER_SECONDS = 30  # 读过一次页面上的名字，这么久之内回到数据页（比如下拉菜单收起来）不再读
+
+    def __init__(self, engine, conn, post, log, play=None, page=None):
+        """page：season_stats.SeasonPage（不给就在第一次用到时新建：读规则、参照图）。"""
+        self.engine, self.conn, self.post, self.log = engine, conn, post, log
+        self.play = play or sounds.play
+        self.page = page
+        self.on = False
+        self.saved = 0  # 这一次录入存了几项
+        self._reset()
+
+    def _reset(self):
+        self.memo = {}  # 每一块上次读的（没变就不再识别，见 season_stats.SeasonPage.read）
+        self.last = {}  # 每一栏上一张读到的：栏 → (哪一项, 读数)，连续两张一样才存
+        self.stored = {}  # 这一次录入存过的：哪一项 → 读数（数字没变就不再存）
+        self.said = set()  # 已经在日志里说过的（被挡住、0 局、不是自己的），每项只说一次
+        self.owner = None  # 页面上的名字和它是不是自己：(名字, 是不是自己, 读的时刻)
+        self.showing = False  # 上一张是数据页（截图加快）
+
+    def check_mode(self, now):
+        """看一眼设置里录入模式开没开（记录程序每隔几秒调用一次，和"游戏语言"一样）。"""
+        on = season_import.active(now)
+        if on and not self.on:
+            self.log(f"[{now:%H:%M:%S}] 录入历史赛季数据：开始（{season_import.until():%H:%M} 结束）。"
+                     "在游戏里打开数据页，一个一个点下拉菜单里的赛季")
+            self.saved = 0
+            self._reset()
+        elif self.on and not on:
+            self.stop(now)
+        self.on = on
+
+    def stop(self, now):
+        """录入模式结束了（到时间、点了"结束"、停止记录）。"""
+        if self.on:
+            self.log(f"[{now:%H:%M:%S}] 录入历史赛季数据：结束，这次存了 {self.saved} 项待核对"
+                     + ("，到 Evo 窗口的\"赛季\"页面核对、保存" if self.saved else ""))
+        self.on = False
+        self._reset()
+
+    def update(self, screen, frame, now, in_match):
+        """每截一帧调用一次。screen：认出的画面（数据页不在里面，是 None）；in_match：正在对局中。"""
+        self.showing = False
+        if not self.on or screen is not None or in_match:
+            return
+        if self.page is None:
+            from season_stats import SeasonPage
+            self.page = SeasonPage(self.engine)
+        if not self.page.on_page(frame):
+            return
+        self.showing = True
+        if not self._own(frame, now):
+            return
+        season, kind, season_name, raw = self.page.label(frame, self.memo)
+        if season is not None:
+            self._panel("season", (season, kind), season_name, frame, now)
+        self._panel("career", (None, "career"), "大逃杀", frame, now)
+
+    def _own(self, frame, now):
+        """页面上的名字是不是自己（结果留 OWNER_SECONDS 秒）。"""
+        if self.owner is None or (now - self.owner[2]).total_seconds() > self.OWNER_SECONDS:
+            name = self.page.name(frame)
+            mine = storage.known_names(self.conn) | ({storage.name_key(self.post.player_name)}
+                                                      if self.post.player_name else set())
+            own = name is not None and (not mine or storage.name_key(name) in mine)
+            self.owner = (name, own, now)
+            if not own:
+                self._say(("owner", name), now, f"数据页上是 {name or '（名字没读出来）'}，不是 Evo 认识的你的名字，不读"
+                          "（只录自己的；好友资料页也是这一页）")
+        else:
+            self.owner = (*self.owner[:2], now)
+        return self.owner[1]
+
+    def _panel(self, panel, key, season_name, frame, now):
+        from season_stats import check, empty, show
+        reading = self.page.read(frame, panel, self.memo)
+        what = "生涯合计" if key[0] is None else f"第 {key[0]} 赛季 {'排位' if key[1] == 'ranked' else '全部'}"
+        if reading["obscured"]:
+            self.last.pop(panel, None)
+            self._say(("obscured", key), now, f"数据页（{what}）被鼠标弹出的说明框挡住了，把鼠标移开一点")
+            return
+        values = reading["values"]
+        stable = self.last.get(panel) == (key, values)
+        self.last[panel] = (key, values)
+        if not stable or self.stored.get(key) == values:
+            return
+        values, approx, problems = check(values, reading["approx"])
+        if empty(values):
+            self.stored[key] = reading["values"]
+            self._say(("empty", key), now, f"数据页：{what} 0 局，不记")
+            return
+        storage.save_season_pending(self.conn, {
+            "player_name": self.owner[0], "season": key[0], "kind": key[1], "season_name": season_name,
+            **values, "approx": sorted(approx), "read_at": f"{now:%Y-%m-%d %H:%M:%S}",
+            "review_note": "\n".join(problems) or None})
+        self.stored[key] = reading["values"]
+        self.saved += 1
+        self.log(f"[{now:%H:%M:%S}] 数据页：{what} 存成待核对（{show(values, approx)}）")
+        for p in problems:
+            self.log(f"           ⚠ {p}")
+        if key[0] is not None:
+            self.play("summary")
+
+    def _say(self, what, now, text):
+        if what not in self.said:
+            self.said.add(what)
+            self.log(f"[{now:%H:%M:%S}] {text}")
 
 
 class Usage:
@@ -381,7 +579,7 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
     - stop（threading.Event）被设置：托盘程序在游戏关闭、暂停或退出时用它喊停
     - 到达 deadline（time.monotonic() 的时刻）
     - 在终端按 Ctrl+C
-    interval：平时每隔几秒截一张；fast：停在总结页、数字还没读全时；match_interval：对局中（默认看 config/hud.json，0.3 秒）
+    interval：平时每隔几秒截一张；fast：停在总结页、数字还没读全时，和停在经验值页时；match_interval：对局中（默认看 config/hud.json，0.3 秒）
     log：输出一行文字的函数（终端里是 print，托盘程序里写进日志文件）
     status：字典，记下的局数会实时写进 status["saved"]（托盘图标显示用）
     keep_all：保留全部截图。None = 按设置页的开关（screenshots.keep_all()），每局结束时再看一眼，
@@ -390,6 +588,8 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
     每隔几秒看一眼；"16:10" 等 = 整次记录都这样（测试时直接指定）
     返回这次一共记下了几局。"""
     set_low_priority()
+    # 先建截屏对象：建不起来（或要新开进程才生效，capture.NeedRestart）就不建这次的截图文件夹
+    camera, how = capture.open_camera(log)
     usage = Usage(log)
     run_dir = CAPTURES_DIR / "live" / datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -411,7 +611,7 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
             if keep:
                 log("           设置页打开了\"保留全部截图\"：从下一局开始全部保留，刚结束的这一局也不删")
             else:
-                protect.update(p.resolve() for p in run_dir.glob("*.png"))
+                protect.update(p.resolve() for p in run_dir.rglob("*.png"))
                 log(f"           设置页关掉了\"保留全部截图\"：从下一局开始识别完就删，之前存下的 {len(protect)} 张不删")
         if keep:
             return
@@ -426,7 +626,6 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
     name_cfg = load_config("player_name.json")
     post = PostMatch(conn, log=log, name_slip=name_cfg["slip_similarity"], on_round_end=round_end)
 
-    camera = dxcam.create(output_color="BGR", processor_backend="numpy")
     # clock 用 lambda 包一层：测试时会把本文件的 time 换成假时钟
     engine = LazyEngine(SMALL_CROP_PARAMS, MODEL_IDLE_SECONDS, clock=lambda: time.monotonic(), log=log)
     detector = GameScreens(engine, log=lambda message: log(f"[{datetime.now():%H:%M:%S}] {message}"))
@@ -439,10 +638,16 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
                              PlayerNameReader(engine, name_cfg), on_read=cues.summary_read)
     other = ScreenWatcher(engine, detector.cfg, load_config("xp.json", lang), load_config("match_start.json", lang),
                           load_config("eliminated.json", lang), post, run_dir, log, keep_all=keep,
-                          busy=lambda: summary.waiting)
-    in_match = InMatchWatcher(hud, post, log, name_cfg, save=lambda frame, name: save_png(run_dir / name, frame),
-                              keep_all=lambda: other.keep_all)
+                          busy=lambda: summary.waiting, on_read=cues.xp_read)
+    def save_hud(frame, name):
+        path = screenshots.path_for(run_dir, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        save_png(path, frame)
+
+    in_match = InMatchWatcher(hud, post, log, name_cfg, save=save_hud,
+                              keep_all=lambda: other.keep_all, before_hand_over=summary.catch_up)
     lobby = LobbyWatcher(LobbyReader(engine, load_config("lobby.json", lang)), post, conn, log)
+    seasons = SeasonWatcher(engine, conn, post, log)  # 录入历史赛季数据（设置页的按钮）
     aspect = AspectWatcher(log, clock=lambda: time.monotonic(), fixed=game_aspect)
 
     def use_language(lang):
@@ -456,7 +661,7 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
         in_match.name_place = names["places"]["hud"]
         lobby.reader.cfg = load_config("lobby.json", lang)
 
-    log(f"屏幕: {camera.width}x{camera.height}")
+    log(f"屏幕: {camera.width}x{camera.height}（截屏：{how['截法']}）")
     if len(detector.detectors) > 1:
         log(f"认得出的游戏语言：{'、'.join(game_lang.label(x) for x in detector.detectors)}（认出第一个画面时定下来）")
     log(f"数据库: {Path(db_path).resolve()}")
@@ -483,7 +688,7 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
     try:
         while keep_going():
             tick = time.monotonic()
-            on_summary = False
+            on_summary = on_xp = False
             try:
                 frame = camera.grab(new_frame_only=False)
             except Exception as e:  # 切换分辨率、切出游戏等情况，跳过这一次
@@ -497,17 +702,21 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
                 if tick >= next_lang_check:  # 设置页的"游戏语言"：每隔几秒看一眼，改了几秒内生效
                     next_lang_check = tick + game_lang.CHECK_SECONDS
                     detector.use_choice(game_lang.choice())
+                    seasons.check_mode(now)  # 录入历史赛季数据开没开（设置页的按钮），同样每隔几秒看一眼
                 screen = detector.detect(frame)
                 if detector.lang != lang:
                     lang = detector.lang
                     use_language(lang)
-                on_summary = screen == "summary"
+                on_summary, on_xp = screen == "summary", screen == "xp"
                 speed.update(screen, in_match.active)  # 读结算画面、大厅时不让 Windows 降频
-                cues.update(screen, now)  # 提示音：小队打完了、进经验值页（总结页读完了由 summary 告诉它）
+                cues.update(screen, now)  # 提示音：小队打完了（总结页读完了由 summary、经验值页读全了由 other 告诉它）
+                summary.update(on_summary, frame, now)  # 没读全就离开（比如直接回大厅）时在这里存下，要在交对局中的数据之前
+                if screen in ("match_start", "lobby"):
+                    summary.catch_up()  # 存总结页时先留着的队友、名字：回到大厅、下一局开局时读，在交对局中的数据之前
                 in_match.update(screen, frame, now)  # 一局结束时先记下；回到大厅、下一局开局时交对局中的数据（先交才收尾）
-                summary.update(on_summary, frame, now)
                 other.update(None if on_summary else screen, frame, now)  # 总结页还没存下时，经验值页先不读
                 lobby.update(screen, frame, now)
+                seasons.update(screen, frame, now, in_match.active)  # 录入模式里：游戏里的数据页
                 if screen is not None:
                     last_seen, warned = tick, False
                 elif not warned and tick - last_seen > NO_SCREEN_WARNING_MINUTES * 60 and not in_match.active:
@@ -520,8 +729,8 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
 
             if status is not None:
                 status["saved"] = total()
-            if on_summary and summary.waiting:
-                wait = fast  # 在总结页等数字读全时，检查得快一些
+            if (on_summary and summary.waiting) or on_xp or seasons.showing:
+                wait = fast  # 在总结页等数字读全时、经验值页上（离开前最后一帧要尽量是动画播完的）、录入模式里停在数据页时，检查得快一些
             elif in_match.active:
                 wait = match_interval
             else:
@@ -531,29 +740,32 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
         log("已手动停止。")
     finally:
         now = datetime.now()
-        in_match.stop(now)
         summary.finish()
+        summary.catch_up()
+        in_match.stop(now)
         other.leave()
         post.finish()
         aspect.reset()
+        seasons.stop(now)
         speed.stop()
         camera.release()
         conn.close()
-        left = sum(1 for p in run_dir.iterdir() if p.suffix.lower() in (".png", ".jpg"))
-        if not any(run_dir.iterdir()):
-            run_dir.rmdir()  # 一张截图都没留下：文件夹也删掉
+        left = sum(1 for p in run_dir.rglob("*") if p.is_file() and p.suffix.lower() in (".png", ".jpg"))
+        screenshots.prune(run_dir)  # 删掉空的分类文件夹；一张截图都没留下时，这次记录的文件夹也删掉
         saved = total()
         per_call = f"（平均每次 {engine.busy / engine.calls:.2f} 秒）" if engine.calls else ""
-        log(f"本次记录：截屏 {frames} 次，其中外观像的 {detector.looked_alike} 次；识别 {engine.calls} 次{per_call}，"
+        log(f"本次记录：截屏 {frames} 次，其中外观像的 {detector.looked_alike + detector.unchanged} 次"
+            f"（{detector.unchanged} 次画面没变，没再读关键字）；识别 {engine.calls} 次{per_call}，"
             f"加载识别模型 {engine.loads} 次；认传奇 {in_match.checks} 次，读右上角 {in_match.top_reads} 块；"
             f"读玩家名 {summary.name_reads + in_match.name_reads} 次（对局中 {in_match.name_reads} 次），"
-            f"玩家名 {post.player_name or '没认出'}；大厅读数 {lobby.saved} 次（读了 {lobby.reads} 次）；"
+            f"玩家名 {post.player_name or '没认出'}；总结页读了 {summary.fields_read} 项（没变沿用 {summary.fields_reused} 项）；"
+            f"大厅读数 {lobby.saved} 次（读了 {lobby.reads} 次）；"
             f"{usage.total()}，内存峰值 {memory_mb()[1]:.0f} MB")
         kinds = "保留全部" if keep else "总结页截图、待确认的局要用的" + ("、关掉开关之前存下的" if protect else "")
         log(f"截图：留下 {left} 张（{kinds}）"
             + (f"，识别完删掉 {tidied['deleted']} 张、总结页截图 {tidied['converted']} 张转成 JPG"
                f"（腾出 {tidied['freed'] / 2 ** 20:.0f} MB）" if tidied["deleted"] or tidied["converted"] or not keep else ""))
-        del engine, detector, camera, summary, other, in_match, hud, lobby, aspect, cues, speed  # 释放识别模型和截屏，交还内存
+        del engine, detector, camera, summary, other, in_match, hud, lobby, aspect, cues, speed, seasons  # 释放识别模型和截屏，交还内存
         gc.collect()
     if status is not None:
         status["saved"] = saved
@@ -563,7 +775,7 @@ def collect(db_path=storage.DB_PATH, interval=1.0, fast=0.3, summary_timeout=10.
 def main():
     parser = argparse.ArgumentParser(description="打游戏时自动识别每一局并存进数据库")
     parser.add_argument("--interval", type=float, default=1, help="平时每隔几秒检查一次（默认 1）")
-    parser.add_argument("--fast", type=float, default=0.3, help="在总结页、数字还没存下时，每隔几秒检查一次（默认 0.3）")
+    parser.add_argument("--fast", type=float, default=0.3, help="在总结页、数字还没存下时，和在经验值页时，每隔几秒检查一次（默认 0.3）")
     parser.add_argument("--match-interval", type=float, default=None,
                         help="对局中每隔几秒截一张（默认看 config/hud.json 的 match_interval，0.3）")
     parser.add_argument("--summary-timeout", type=float, default=10,

@@ -242,12 +242,16 @@ def checks():
     out["两列卡片：传奇热度、热门组合、大家常用的武器、你在 Evo 玩家中；段位分布在下面"] = (
         re.search(r'<div class="stats-grid">.*id="h-hot".*id="h-combos".*id="h-weapons".*id="h-you".*</div>\s*<details', full, re.S)
         is not None)
-    out["传奇热度：卡片上列前 5 个（按出场次数，有\"你\"），\"查看全部 10 个传奇\"打开完整的表格（10 个）"] = (
-        rows_of(full.split('id="h-combos"')[0]) == LEGENDS[:5] and you_cell(full, "恶灵") is not None
+    legend_card = lambda html: html.split('id="h-combos"')[0]  # noqa: E731
+    podium_names = lambda html: re.findall(r'class="podium-name">([^<]+)</span>', legend_card(html))  # noqa: E731
+    out["传奇热度：前三名颁奖台、第四五名列表，仍能打开完整表格"] = (
+        podium_names(full) == LEGENDS[:3] and rows_of(legend_card(full)) == LEGENDS[3:5]
+        and 'class="podium-meta podium-you"' in legend_card(full)
         and '<a class="peek-more" href="/stats/legends?view=all&amp;range=all&amp;mode=ranked&amp;tier=all">' in full
         and "查看全部 <span class=\"num\">10</span> 个传奇" in full and rows_of(hot) == LEGENDS)
     out["热门组合：卡片上列前 5 个（只放头像，名字在悬停和读屏里），完整的表格 7 个"] = (
-        len(rows_of(full.split('id="h-combos"')[1].split('id="h-weapons"')[0])) == 5
+        len(rows_of(full.split('id="h-combos"')[1].split('id="h-weapons"')[0])) == 2
+        and len(re.findall(r'class="podium-slot podium-\d+"', full.split('id="h-combos"')[1])) == 3
         and f'title="{"、".join(COMBOS[0])}"' in full and "查看全部 <span class=\"num\">7</span> 个组合" in full
         and len(rows_of(combos)) == 7)
     out["完整的表格：\"← 全体玩家\"回到卡片那页，没有\"我的 / 全体玩家\"切换"] = (
@@ -288,15 +292,16 @@ def checks():
         rows_of(weapon_section(week)) == ["R-301"]
         and weapon_cell(page("/stats/weapons?view=all&range=7d"), "R-301")[2] == "52.0%2局")
     out["近 7 天：用近 7 天的汇总，你的局只算 7 天以内（罗芭那局 10 天前，不算）"] = (
-        rows_of(week.split('id="h-combos"')[0]) == ["罗芭", "恶灵"] and you_cell(week, "罗芭") == ("—", None)
+        podium_names(week) == ["罗芭", "恶灵"] and 'podium-you-blank' in legend_card(week)
+        and you_cell(page("/stats/legends?view=all&range=7d"), "罗芭") == ("—", None)
         and "5</span> 名玩家" in week)
     diamond = page("/stats?view=all&tier=diamond")
     out["钻石：用钻石的汇总，筛选按钮选中钻石"] = (
-        rows_of(diamond.split('id="h-combos"')[0]) == ["探路者"] and 'aria-current="true">钻石</a>' in diamond)
+        podium_names(diamond) == ["探路者"] and 'aria-current="true">钻石</a>' in diamond)
     pubs = page("/stats?view=all&mode=pubs&tier=diamond")
     out["匹配：没有段位按钮；没认出模式的局算匹配（动力小子 1 局，名次 4）"] = (
-        "段位</span>" not in pubs and rows_of(pubs.split('id="h-combos"')[0]) == ["动力小子"]
-        and you_cell(pubs, "动力小子") == ("4.0（比全体好）1局", "better"))
+        "段位</span>" not in pubs and podium_names(pubs) == ["动力小子"]
+        and you_cell(page("/stats/legends?view=all&mode=pubs"), "动力小子") == ("4.0（比全体好）1局", "better"))
     out["汇总里没有武器（老的统计服务器、还没人发过）：写\"还没有记下武器的对局\"，不写局数"] = (
         "这个范围里还没有记下武器的对局" in weapon_section(pubs) and "记下了武器的" not in weapon_section(pubs))
     deep = page("/stats/legends?view=all&tier=diamond")
@@ -307,6 +312,15 @@ def checks():
         client.get("/stats/mates?view=all").status_code == 404 and client.get("/stats/x?view=all").status_code == 404)
     out["网址里不认识的筛选：用默认（全部、排位、全部段位）"] = (
         global_stats.choose({"range": "x", "mode": "y", "tier": "z"}) == ("all", "ranked", "all"))
+    cached = global_stats.cached()["summary"]
+    season_summary = {**cached, "season_from": cached["recent_from"],
+                      "slices": {**cached["slices"], "season.ranked.all": cached["slices"]["7d.ranked.all"]}}
+    out["本赛季仅在汇总有赛季切片时可选；本机比较使用同一日期下界"] = (
+        "season" not in global_stats.ranges(cached)
+        and global_stats.choose({}, season_summary) == ("season", "ranked", "all")
+        and global_stats.page(season_summary, [], [], "season", "ranked", "all")["players"] == 5
+        and not global_stats._mine([{"mode": "ranked", "ended_at": "2000-01-01"}],
+                                   season_summary, "season", "ranked", "all"))
 
     # ---- 什么时候重新下载 ----
     Handler.requests.clear()

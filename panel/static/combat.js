@@ -10,7 +10,7 @@
  const avg=vs=>vs.length?vs.reduce((a,b)=>a+b,0)/vs.length:null;
  const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!=null)n.textContent=text;if(cls)n.className=cls;return n;};
  const svg=(parent,tag,attrs,text)=>{const n=document.createElementNS(NS,tag);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,v));if(text!=null)n.textContent=text;parent.append(n);return n;};
- const link=r=>{const a=node('a','查看这局 →');a.href=`/matches?page=${encodeURIComponent(r.page||1)}&open=${encodeURIComponent(r.id)}#m${encodeURIComponent(r.id)}`;return a;};
+ const link=r=>{const a=node('a','查看这局 →');a.href=`/matches?range=all&page=${encodeURIComponent(r.page||1)}&open=${encodeURIComponent(r.id)}#m${encodeURIComponent(r.id)}`;return a;};
  const context=r=>`${r.when||'时间未识别'} · ${r.legend} · ${r.map} · ${r.mode} · ${r.rank_tier}${r.review?' · 待确认':''}`;
  const numbers=r=>`击杀 ${fmt(r.kills)} / 助攻 ${fmt(r.assists)} / 击倒 ${fmt(r.knockdowns)} / 伤害 ${fmt(r.damage,0)} / 名次 ${fmt(r.placement,0)} / RP ${fmt(r.rp_delta)}`;
  function details(target,r){target.replaceChildren(node('span',context(r)),node('strong',numbers(r)),link(r));}

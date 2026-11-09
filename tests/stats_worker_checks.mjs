@@ -122,6 +122,22 @@ for (const order of [[a,b],[b,a]]) {
   checks["旧删除接口同时清理该设备的身份别名"] = true;
   db.db.close();
 }
+{
+  const db = new D1(schema);
+  await post(db, a, [match(ka, { day: "2026-11-03", tier: "钻石" })]);
+  await post(db, a, [match(kb, { match_id: "d".repeat(32), day: "2026-11-04", tier: "白金" })]);
+  await post(db, b, [match("3".repeat(20), { match_id: "d".repeat(32), day: "2026-11-04", tier: "白金" })]);
+  const response = await worker.fetch(new Request("https://unit.invalid/v1/summary"), { DB: db });
+  assert.equal(response.status, 200);
+  const summary = await response.json();
+  assert.equal(summary.season_from, "2026-11-04");
+  assert.equal(summary.slices["all.ranked.all"].matches, 2);
+  assert.equal(summary.slices["season.ranked.all"].matches, 1);
+  assert.equal(summary.slices["season.ranked.all"].combos[0].n, 1);
+  assert.equal(summary.tiers.season.counts["白金"], 1);
+  checks["赛季汇总排除开赛当天，只统计去重后的本赛季对局"] = true;
+  db.db.close();
+}
 if (fixture.reports) {
   assert.equal(fixture.local_ids_differ, true);
   const db = new D1(schema);

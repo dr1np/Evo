@@ -6,7 +6,7 @@
 
 {# 数据页"我的"：两列卡片（2026-10-28 用户决定），每张先列 peek 行、只放最要紧的几列；点卡片打开完整的表格
    （part = weapons / mates / legends / combos，还是这个模板，左上角"← 数据"回来）。范围跟着带过去 #}
-{% set range_arg = none if range_key == '30' else range_key %}
+{% set range_arg = none if range_key == 'season' else range_key %}
 
 {% block content %}
 
@@ -41,14 +41,14 @@
     <span class="label">统计范围</span>
     <div class="seg" role="group" aria-label="统计范围">
       {% for key, label in ranges.items() %}
-      <a href="{{ stats_url(range=none if key == '30' else key) }}" class="{{ 'on' if range_key == key }}"{% if range_key == key %} aria-current="true"{% endif %}>{{ label }}</a>
+      <a href="{{ stats_url(range=none if key == 'season' else key) }}" class="{{ 'on' if range_key == key }}"{% if range_titles.get(key) %} title="{{ range_titles[key] }}"{% endif %}{% if range_key == key %} aria-current="true"{% endif %}>{{ label }}</a>
       {% endfor %}
     </div>
   </div>
 </div>
 
 <form method="get" action="{{ url_for('stats', part=part) }}" class="stats-filter-form">
-  {% if range_key != '30' %}<input type="hidden" name="range" value="{{ range_key }}">{% endif %}
+  {% if range_key != 'season' %}<input type="hidden" name="range" value="{{ range_key }}">{% endif %}
   <label>模式<select name="mode">{% for key, label in analysis_modes.items() %}<option value="{{ key }}"{{ ' selected' if stat_filters.mode == key }}>{{ label }}</option>{% endfor %}</select></label>
   {% for key, label in [('legend', '传奇'), ('map', '地图')] %}
   <label>{{ label }}<select name="{{ key }}"><option value="">全部{{ label }}</option><option value="__unknown__"{{ ' selected' if stat_filters[key] == '__unknown__' }}>未识别{{ label }}</option>{% for value in filter_options[key] %}<option value="{{ value }}"{{ ' selected' if stat_filters[key] == value }}>{{ value }}</option>{% endfor %}</select></label>
@@ -62,7 +62,13 @@
 </section>
 {% for error in filter_errors %}<p role="alert">{{ error }}</p>{% endfor %}
 <p class="stats-filter-status">筛选后共 {{ selected_games }} 局 · 先筛选，再取{{ ranges[range_key] }}。</p>
-{% if not selected_games %}<div class="stats-empty" role="status">这个筛选下还没有对局，请调整条件或重置。</div>{% endif %}
+{% if not selected_games %}
+  {% if range_titles.get(range_key) and not (stat_filters.mode != 'all' or stat_filters.legend or stat_filters.map or stat_filters.since or stat_filters.until) %}
+    {% include "_season_empty.html" %}
+  {% else %}
+    <div class="stats-empty" role="status">这个筛选下还没有对局，请调整条件或重置。</div>
+  {% endif %}
+{% endif %}
 {% if not part %}
 {% include '_analytics.html' %}
 <h2 class="stats-breakdown-title">分类明细</h2>

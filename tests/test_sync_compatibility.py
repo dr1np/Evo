@@ -38,8 +38,8 @@ def migration_checks():
         conn = s.connect(db)
         backup = sqlite3.connect(next(db.parent.glob("evo.db.before-*.bak")))
         row = s.get_match(conn, 7)
-        out[f"schema {version} → 10：备份完整，原行 ID、数值、NULL、路径不变"] = (
-            conn.execute("PRAGMA user_version").fetchone()[0] == 10 and row["kills"] == 4
+        out[f"schema {version} → 11：备份完整，原行 ID、数值、NULL、路径不变"] = (
+            conn.execute("PRAGMA user_version").fetchone()[0] == s.SCHEMA_VERSION and row["kills"] == 4
             and row["damage"] is None and row["evidence_path"] == "captures/original.png"
             and backup.execute("PRAGMA user_version").fetchone()[0] == version
             and backup.execute("SELECT match_id,kills,damage,evidence_path FROM matches").fetchone()
@@ -98,6 +98,54 @@ def migration_checks():
     return out
 
 
+def season_upgrade_checks():
+    out = {}
+    folder = t.fresh("compat/upstream-season-v9")
+    db = folder / "data" / "evo.db"
+    upstream_base = historical_storage("457a159")
+    conn = upstream_base.connect(db)
+    mid = upstream_base.insert_match(conn, {"player_name": "Main", "damage": 321})
+    conn.execute(s.SEASON_TABLE)
+    conn.execute("INSERT INTO season_stats(player_name, season, kind, games, read_at, status) "
+                 "VALUES ('Main', 30, 'all', 21, '2026-11-01 12:00:00', 'saved')")
+    conn.execute("PRAGMA user_version=9")
+    conn.commit()
+    conn.close()
+    conn = s.connect(db)
+    s.ensure_sync_ids(conn)
+    out["上游 v9 → 11：赛季汇总和战绩不变，补齐 WebDAV 表及身份"] = (
+        s.season_rows(conn, "saved")[0]["games"] == 21 and s.get_match(conn, mid)["damage"] == 321
+        and bool(s.get_match(conn, mid)["sync_uid"]) and not s.tombstones(conn)
+        and conn.execute("PRAGMA user_version").fetchone()[0] == 11)
+    conn.close()
+
+    folder = t.fresh("compat/fork-v10")
+    db = folder / "data" / "evo.db"
+    old = historical_storage("de0b926")
+    conn = old.connect(db)
+    keep = old.insert_match(conn, {"player_name": "Main", "damage": 300})
+    gone = old.insert_match(conn, {"player_name": "Alt", "damage": 200})
+    uid = old.get_match(conn, gone)["sync_uid"]
+    old.save_lobby(conn, {"player_name": "Alt", "read_at": "2026-11-05 12:00:00", "score": 123})
+    old_snapshot = w.export_snapshot(conn, folder)
+    conn.close()
+    conn = s.connect(db)
+    out["本分支 v10 → 11：保留同步身份和逻辑版本，新增赛季表和升级前备份"] = (
+        s.get_match(conn, gone)["sync_uid"] == uid and not s.season_rows(conn)
+        and w._revision(conn, "match", uid) is not None and bool(list(db.parent.glob("evo.db.before-v10-to-v11-*.bak"))))
+    s.save_season_pending(conn, {"player_name": "Alt", "season": 30, "kind": "all", "games": 12,
+                                 "read_at": "2026-11-04 12:00:00"})
+    account = next(row for row in s.accounts(conn) if row["name"] == "Alt")
+    _, counts = s.delete_account(conn, account["id"])
+    w.merge_snapshots(conn, [old_snapshot], data_dir=folder)
+    out["删账号：历史赛季一并删除，旧快照不能恢复其战绩或大厅读数"] = (
+        counts == {"matches": 1, "lobby": 1, "seasons": 1} and s.get_match(conn, keep) is not None
+        and s.get_match(conn, gone) is None and not s.season_rows(conn) and not s.lobby_readings(conn)
+        and {r["kind"] for r in s.tombstones(conn)} == {"match", "lobby"})
+    conn.close()
+    return out
+
+
 def credential_checks():
     out = {}
     cfg = w.save_config("https://dav.example/dav", t.USER, t.PASSWORD, "Evo")
@@ -147,7 +195,7 @@ def media_checks():
 
 def main():
     checks = {}
-    for part in (migration_checks, credential_checks, media_checks):
+    for part in (migration_checks, season_upgrade_checks, credential_checks, media_checks):
         checks.update(part())
     return t.report(checks)
 

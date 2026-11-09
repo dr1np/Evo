@@ -95,7 +95,7 @@ def range_links(page):
     seg = re.search(r'<div class="seg" role="group" aria-label="统计范围">(.*?)</div>', page, re.S)
     if not seg:
         return {}
-    return {label: href for href, label in re.findall(r'<a href="([^"]+)"[^>]*>(近 30 局|全部)</a>', seg.group(1))}
+    return {label: href for href, label in re.findall(r'<a href="([^"]+)"[^>]*>(本赛季|上赛季|近 30 局|全部)</a>', seg.group(1))}
 
 
 def legend_card(page):
@@ -123,10 +123,10 @@ def main():
     client = panel_app.app.test_client()
 
     pages = {
-        "default": client.get("/").get_data(as_text=True),
+        "default": client.get("/?range=30").get_data(as_text=True),
         "all": client.get("/?range=all").get_data(as_text=True),
         "ranked": client.get("/?range=all&mode=ranked").get_data(as_text=True),
-        "ranked30": client.get("/?mode=ranked").get_data(as_text=True),
+        "ranked30": client.get("/?range=30&mode=ranked").get_data(as_text=True),
         "pubs": client.get("/?range=all&mode=pubs").get_data(as_text=True),
         "ziling": client.get("/?range=all&mode=ranked&legend=恶灵").get_data(as_text=True),
         "ziling_pubs": client.get("/?range=all&mode=pubs&legend=恶灵").get_data(as_text=True),
@@ -151,7 +151,7 @@ def main():
 
     checks = {
         "12 项，分两组，每组 6 项": list(values["default"]) == LABELS,
-        "默认：近 30 局、模式全部，标题旁写共 30 局": counts["default"] == 30
+        "近 30 局、模式全部，标题旁写共 30 局": counts["default"] == 30
                                               and values["default"] == expected(rows, last30=True),
         "范围=全部：共 40 局": counts["all"] == 40 and values["all"] == expected(rows),
         "模式=排位：只算排位局（35 局）": counts["ranked"] == 35 and values["ranked"] == expected(rows, "ranked"),
@@ -176,7 +176,8 @@ def main():
                                           and links.get("排位") == ('/?range=all&amp;mode=ranked', False)
                                           and links.get("匹配") == ('/?range=all&amp;mode=pubs', False),
         "改范围时保留模式和传奇筛选": range_links(pages["ziling"]) == {
-            "近 30 局": "/?mode=ranked&amp;legend=%E6%81%B6%E7%81%B5",
+            "本赛季": "/?mode=ranked&amp;legend=%E6%81%B6%E7%81%B5",
+            "近 30 局": "/?range=30&amp;mode=ranked&amp;legend=%E6%81%B6%E7%81%B5",
             "全部": "/?range=all&amp;mode=ranked&amp;legend=%E6%81%B6%E7%81%B5"},
         "没有符合筛选的局：写明，不出 12 个空数字": "这个筛选下还没有对局" in lonely and "stat-value" not in lonely,
         "分享卡片的概况仍然 6 项（场均名次、击杀、伤害、前五率、胜率、统计局数）": [

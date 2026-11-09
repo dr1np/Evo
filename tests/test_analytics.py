@@ -72,7 +72,7 @@ def main():
     client = panel_app.app.test_client()
     with client.session_transaction() as session:
         session["account"] = "all"
-    page = client.get("/stats?mode=ranked&map=世界尽头").get_data(as_text=True)
+    page = client.get("/stats?range=30&mode=ranked&map=世界尽头").get_data(as_text=True)
     parsed = json.loads(re.search(r'<script type="application/json" data-analysis-json>(.*?)</script>', page, re.S)[1])
     details = client.get("/stats/legends?mode=ranked&map=世界尽头&legend=恶灵&since=2026-10-01&until=2026-10-31").get_data(as_text=True)
     empty = client.get("/stats?since=2099-01-01").get_data(as_text=True)
@@ -86,7 +86,7 @@ def main():
         "模式修正后的非排位 RP 不进入表格与总览合计": panel_app.group_numbers([sample])["avg_rp"] == "—" and panel_app.rp_sum([sample])["good"] is None,
         "图表数据不包含名字、原始备注和截图": not ({"player_name", "review_note", "evidence_path"} & data["rows"][0].keys()),
         "先筛选排位，再取近 30 局": len(parsed["rows"]) == 30 and all(r["mode"] == "排位" for r in parsed["rows"]) and parsed["rows"][0]["damage"] == 500,
-        "历史对局的图表跳转定位到正确分页": parsed["rows"][0]["page"] == 2 and f'id="m{parsed["rows"][0]["id"]}"' in client.get(f'/matches?page=2&open={parsed["rows"][0]["id"]}').get_data(as_text=True),
+        "历史对局的图表跳转定位到正确分页": parsed["rows"][0]["page"] == 2 and f'id="m{parsed["rows"][0]["id"]}"' in client.get(f'/matches?range=all&page=2&open={parsed["rows"][0]["id"]}').get_data(as_text=True),
         "卡片明细链接保留筛选": 'mode=ranked' in page and 'map=' in page and '/stats/legends?' in page,
         "完整表格返回链接保留全部筛选": re.search(r'class="back-link"', details) is not None and all(f'{key}=' in details for key in ("mode", "map", "legend", "since", "until")),
         "筛选无结果保留控件和空状态": '这个筛选下还没有对局' in empty and 'name="since"' in empty and 'data-analysis' in empty,

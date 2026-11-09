@@ -29,7 +29,7 @@ ICON_SIZES = [(s, s) for s in (16, 24, 32, 48, 64, 128, 256)]
 WEBVIEW2_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 
 LICENSE_NOTE = """Evo 自己的代码和提示音使用 GNU AGPL-3.0 许可证，见上一层的 LICENSE.txt。
-Evo 的源代码：https://github.com/AugustHuangMX/Evo
+Evo 的源代码：https://github.com/Evo-Apex/Evo
 
 Evo 使用了以下第三方库，它们各自的许可证随库一起放在 _internal 文件夹里（*.dist-info）：
 
@@ -84,6 +84,10 @@ def add_licenses():
 
 
 def main():
+    try:
+        from mss import MSS  # noqa: F401  DXGI 不可用时的截屏回退也必须随包发布
+    except ImportError:
+        raise SystemExit('缺少截屏回退依赖，请先运行 python -m pip install "mss>=10.2,<11"')
     make_icon()
     get_webview2_setup()
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "tools/evo.spec"], cwd=ROOT, check=True)
